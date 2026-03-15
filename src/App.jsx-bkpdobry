@@ -1,0 +1,735 @@
+import React, { useState, useEffect, useRef } from 'react';
+import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+
+const WORLD_LOCATIONS = [
+  { name: 'Puszcza Amazońska', lat: -3.46, lon: -62.21 },
+  { name: 'Częstochowa, PL', lat: 50.81, lon: 19.11 },
+  { name: 'Jakuck, Syberia', lat: 62.03, lon: 129.73 },
+  { name: 'Sahara, Algieria', lat: 23.80, lon: 11.28 },
+  { name: 'Kioto, Japonia', lat: 35.01, lon: 135.76 },
+  { name: 'Seattle, USA', lat: 47.60, lon: -122.33 },
+  { name: 'Reykjavik, Islandia', lat: 64.14, lon: -21.92 }
+];
+
+const ANIMALS_MAMMALS = [
+    { name: 'Lis', color: 0xd35400 }, { name: 'Kuna', color: 0x8e44ad }, { name: 'Wiewiórka', color: 0xe67e22 },
+    { name: 'Nietoperz', color: 0x2c3e50 }, { name: 'Ryjówka', color: 0x7f8c8d }, { name: 'Gryzoń', color: 0x95a5a6 }
+];
+
+// ZAKTUALIZOWANA LISTA PTAKÓW NA PODSTAWIE ZRZUTU EKRANU (Ważna wielkość liter!)
+const ANIMALS_BIRDS = [
+    { name: 'Płomykówka', file: 'BarnOwl.glb', color: 0xffddaa },
+    { name: 'Sójka', file: 'Bird_01.glb', color: 0x2980b9 },
+    { name: 'Jaskółka', file: 'CliffSwallow.glb', color: 0x334455 },
+    { name: 'Wrona', file: 'Crow.glb', color: 0x333333 },
+    { name: 'Puchacz', file: 'GreatHornedOwl.glb', color: 0x5c4033 },
+    { name: 'Koliber', file: 'Mesh_Hummingbird.glb', color: 0x2ecc71 },
+    { name: 'Kruk', file: 'Mesh_Raven.glb', color: 0x222222 },
+    { name: 'Syczek', file: 'ScreechOwl.glb', color: 0x8b4513 },
+    { name: 'Wróbel', file: 'sparrow.glb', color: 0xa0522d }
+];
+
+const EcosystemShader = {
+  uniforms: { "tDiffuse": { value: null }, "time": { value: 0.0 }, "toxicity": { value: 0.0 }, "hypoxia": { value: 0.0 }, "stirIntensity": { value: 0.0 } },
+  vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float time; uniform float toxicity; uniform float hypoxia; uniform float stirIntensity;
+    varying vec2 vUv;
+    void main() {
+      vec2 uv = vUv;
+      uv.x += sin(uv.y * 30.0 + time * 15.0) * (0.003 * stirIntensity);
+      float wave = sin(uv.y * 10.0 + time * 2.0) * (0.02 * toxicity);
+      uv.x += wave;
+      float shift = 0.01 * toxicity + (0.005 * stirIntensity);
+      vec4 color = vec4(0.0);
+      color.r = texture2D(tDiffuse, vec2(uv.x + shift, uv.y)).r;
+      color.g = texture2D(tDiffuse, uv).g;
+      color.b = texture2D(tDiffuse, vec2(uv.x - shift, uv.y)).b;
+      color.a = 1.0;
+      vec2 center = vUv - 0.5;
+      float dist = length(center);
+      float vignette = smoothstep(1.0 - (hypoxia * 0.5), 0.3, dist);
+      color.rgb *= vignette;
+      color.r += dist * hypoxia * 0.5;
+      color.g += dist * toxicity * 0.3;
+      gl_FragColor = color;
+    }
+  `
+};
+
+function createWoodTexture() {
+    const canvas = document.createElement("canvas"); canvas.width = 1024; canvas.height = 1024; const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#5c4033"; ctx.fillRect(0, 0, 1024, 1024);
+    for(let i=0; i<3000; i++) {
+        ctx.fillStyle = Math.random() > 0.5 ? `rgba(40, 25, 15, ${Math.random() * 0.6})` : `rgba(100, 70, 50, ${Math.random() * 0.4})`;
+        ctx.fillRect(Math.random()*1024, Math.random()*1024, 2 + Math.random()*6, 40 + Math.random()*150);
+    }
+    return new THREE.CanvasTexture(canvas);
+}
+
+function createLeafTexture() {
+    const canvas = document.createElement("canvas"); canvas.width = 512; canvas.height = 512; const ctx = canvas.getContext("2d");
+    ctx.fillStyle = `rgba(80, 50, 30, ${Math.random() * 0.4})`; ctx.fillRect(0, 0, 512, 512);
+    for(let i=0; i<1000; i++) {
+        ctx.fillStyle = `rgba(${Math.floor(40 + Math.random()*40)}, ${Math.floor(20 + Math.random()*20)}, 10, ${Math.random() * 0.5})`;
+        ctx.fillRect(Math.random()*512, Math.random()*512, 1 + Math.random()*3, 10 + Math.random()*40);
+    }
+    return new THREE.CanvasTexture(canvas);
+}
+
+function makeTextSprite(text, color) {
+    const canvas = document.createElement('canvas'); canvas.width = 300; canvas.height = 80;
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'bold 24px "Courier New"'; ctx.textAlign = 'center';
+    ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeText(text, 150, 50);
+    ctx.fillStyle = color; ctx.fillText(text, 150, 50);
+    const texture = new THREE.CanvasTexture(canvas);
+    const spriteMaterial = new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true });
+    const sprite = new THREE.Sprite(spriteMaterial); 
+    sprite.scale.set(3, 0.8, 1);
+    return sprite;
+}
+
+function createProceduralAnimal(type, colorHex) {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.9 });
+
+    if (type === 'BIRD') { 
+        const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.3, 0.4, 8, 16), mat); body.rotation.x = Math.PI / 2; group.add(body);
+        const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 16), mat); head.position.set(0, 0.2, 0.35); group.add(head);
+        const beak = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.3, 8), new THREE.MeshStandardMaterial({ color: 0xf1c40f })); beak.rotation.x = Math.PI / 2; beak.position.set(0, 0.2, 0.6); group.add(beak);
+        const tail = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.05, 0.5), mat); tail.position.set(0, 0, -0.4); group.add(tail);
+    } else if (type === 'MAMMAL') {
+        const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.7, 8, 16), mat); body.rotation.x = Math.PI / 2; group.add(body);
+        const tail = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.6, 8, 8), mat); tail.position.set(0, 0.2, -0.6); tail.rotation.x = Math.PI / 4; group.add(tail);
+        const snout = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.3, 8), new THREE.MeshStandardMaterial({ color: 0x222222 })); snout.rotation.x = Math.PI / 2; snout.position.set(0, 0.1, 0.6); group.add(snout);
+    } else if (type === 'FROG') {
+        const frogMat = new THREE.MeshStandardMaterial({ color: 0x2ecc71, roughness: 0.6 });
+        const body = new THREE.Mesh(new THREE.SphereGeometry(0.4, 16, 16), frogMat); body.scale.set(1.2, 0.6, 1.1); group.add(body);
+        const eyeMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+        const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), eyeMat); eyeL.position.set(-0.25, 0.25, 0.3);
+        const eyeR = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), eyeMat); eyeR.position.set(0.25, 0.25, 0.3);
+        group.add(eyeL, eyeR);
+    }
+    
+    group.scale.set(0.8, 0.8, 0.8);
+    return group;
+}
+
+export default function Dendrotelma3D() {
+  const mountRef = useRef(null);
+  const sceneGroups = useRef({ interact: null, visual: null, animals: null }); 
+  const modelsCache = useRef({}); 
+  
+  const [gameState, setGameState] = useState('MENU'); 
+  const [leaderboard, setLeaderboard] = useState(() => JSON.parse(localStorage.getItem('dendrotelma_scores')) || []);
+
+  const [maxCapacity, setMaxCapacity] = useState(100); 
+  const [water, setWater] = useState(60);
+  const [oxygen, setOxygen] = useState(40);
+  const [toxicity, setToxicity] = useState(0);
+  const [detritus, setDetritus] = useState(0);
+  
+  const [day, setDay] = useState(1);
+  const [cause, setCause] = useState('');
+  const [score, setScore] = useState(0);
+  const [algae, setAlgae] = useState(0);
+  const [larvae, setLarvae] = useState(2);
+  
+  const [upgrades, setUpgrades] = useState({ moss: 0, fungi: 0, insects: 0 });
+  
+  // TA LINIJKA BYŁA ZGUBIONA I POWODOWAŁA BŁĄD (CRASH) GRY
+  const [showTooltip, setShowTooltip] = useState(false);
+  
+  const [season, setSeason] = useState('Wiosna');
+  const [gameTemp, setGameTemp] = useState(15);
+  const [isRaining, setIsRaining] = useState(false);
+  const [locationName, setLocationName] = useState('Wyszukiwanie...');
+  const [cameraLogs, setCameraLogs] = useState([]);
+
+  const engine = useRef({ 
+      water, oxygen, toxicity, detritus, maxCapacity, algae, larvae, day, score, state: gameState,
+      upgrades, stirring: false, stirIntensity: 0, leaves: [], visitors: [], isRaining, season, gameTemp
+  });
+
+  useEffect(() => {
+      engine.current = { 
+        ...engine.current, water, oxygen, toxicity, detritus, maxCapacity, algae, larvae, score, day, upgrades, state: gameState, isRaining, season, gameTemp
+      };
+  }, [water, oxygen, toxicity, detritus, maxCapacity, algae, larvae, score, day, upgrades, gameState, isRaining, season, gameTemp]);
+
+  const addLog = (message, color = "#2ecc71") => {
+      setCameraLogs(prev => [{ id: Date.now(), text: message, color }, ...prev].slice(0, 4));
+  };
+
+  const fetchWeather = () => {
+    const loc = WORLD_LOCATIONS[Math.floor(Math.random() * WORLD_LOCATIONS.length)];
+    setLocationName(loc.name);
+    fetch(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}&current_weather=true`)
+      .then(res => res.json())
+      .then(data => {
+        const wCode = data.current_weather.weathercode;
+        setIsRaining((wCode >= 51 && wCode <= 69) || (wCode >= 80));
+        setGameTemp(Math.round(data.current_weather.temperature));
+      }).catch(() => { setIsRaining(false); setGameTemp(15); });
+  };
+
+  // Ładowanie Modeli GLB
+  useEffect(() => {
+      const loader = new GLTFLoader();
+      ANIMALS_BIRDS.forEach(bird => {
+          loader.load(
+              `/models/${bird.file}`, 
+              (gltf) => {
+                  const model = gltf.scene;
+                  model.scale.set(0.5, 0.5, 0.5); 
+                  model.traverse((child) => { if (child.isMesh) { child.castShadow = true; } });
+                  modelsCache.current[bird.file] = model;
+              },
+              undefined,
+              (error) => console.warn(`Nie znaleziono modelu ${bird.file}, użyję wersji awaryjnej. Upewnij się, że plik jest w folderze public/models/`)
+          );
+      });
+  }, []);
+
+  useEffect(() => {
+    if (gameState !== 'PLAYING') return; 
+
+    const gameTick = setInterval(() => {
+      const state = engine.current;
+      
+      const seasonIndex = Math.floor(((state.day - 1) % 120) / 30);
+      const seasons = ['Wiosna', 'Lato', 'Jesień', 'Zima'];
+      const currentSeason = seasons[seasonIndex];
+      setSeason(currentSeason);
+
+      let tempTarget = 15;
+      if(currentSeason === 'Lato') tempTarget = 30;
+      if(currentSeason === 'Jesień') tempTarget = 8;
+      if(currentSeason === 'Zima') tempTarget = -5;
+      
+      let newTemp = state.gameTemp + (tempTarget - state.gameTemp) * 0.1 + (Math.random() * 2 - 1);
+      setGameTemp(newTemp);
+
+      let rainChance = 0.1; let stopRainChance = 0.1;
+      if(currentSeason === 'Lato') { rainChance = 0.02; stopRainChance = 0.3; }
+      if(currentSeason === 'Jesień') { rainChance = 0.2; stopRainChance = 0.05; }
+      if(currentSeason === 'Zima') { rainChance = 0.15; stopRainChance = 0.1; }
+      
+      if(state.isRaining && Math.random() < stopRainChance) setIsRaining(false);
+      else if(!state.isRaining && Math.random() < rainChance) setIsRaining(true);
+
+      let rainWaterBonus = (state.isRaining && currentSeason !== 'Zima') ? 3.0 : 0;
+      let rainOxygenBonus = state.isRaining ? 1.0 : 0;
+      
+      let wMod = -1.0; 
+      let oMod = (state.algae * 1.5) - (state.larvae * 1.0) - (state.leaves.length * 0.8);
+      let tMod = (state.leaves.length * 1.2) - (state.larvae * 0.4); 
+
+      if (state.toxicity > state.maxCapacity * 0.8 && state.larvae > 0 && Math.random() < 0.15) {
+          setLarvae(l => Math.max(0, l - 1));
+          addLog(`[!] Larwa padła z powodu toksyn!`, "#ff4444");
+      }
+
+      wMod += state.upgrades.moss * 0.8; 
+      tMod -= state.upgrades.fungi * 1.5; 
+      oMod += state.upgrades.insects * 1.5; 
+
+      if (currentSeason === 'Wiosna') oMod += 0.5;
+      if (currentSeason === 'Lato') wMod -= 1.5; 
+      if (currentSeason === 'Jesień') tMod += 1.0; 
+      if (currentSeason === 'Zima') { wMod = 0; oMod -= 4.0; }
+
+      if (Math.random() < 0.08) { 
+          const eventType = Math.random();
+          let visitorData = null;
+          let rX, rZ;
+
+          if (eventType < 0.4) { 
+              const bird = ANIMALS_BIRDS[Math.floor(Math.random() * ANIMALS_BIRDS.length)];
+              visitorData = { color: bird.color, name: bird.name, file: bird.file, duration: 4, type: 'BIRD' };
+              rX = (Math.random() - 0.5) * 8;
+              rZ = (Math.random() - 0.5) * 8;
+              
+              if (Math.random() > 0.6 && state.larvae > 0 && currentSeason !== 'Zima') {
+                  setLarvae(l => Math.max(0, l - 1));
+                  addLog(`> ${bird.name} wydziobał pożywienie!`, "#ffaa00");
+              } else if (currentSeason !== 'Zima') {
+                  wMod -= 5; oMod += 10; engine.current.stirIntensity = 0.8;
+                  addLog(`> ${bird.name} zażywa kąpieli!`, "#00ffff");
+              }
+          } else if (eventType < 0.75 && currentSeason !== 'Zima') { 
+              const mammal = ANIMALS_MAMMALS[Math.floor(Math.random() * ANIMALS_MAMMALS.length)];
+              visitorData = { color: mammal.color, name: mammal.name, duration: 5, type: 'MAMMAL' };
+              rX = (Math.random() > 0.5 ? 1 : -1) * (6 + Math.random() * 3);
+              rZ = (Math.random() - 0.5) * 14;
+
+              if (Math.random() > 0.5) {
+                  wMod -= 10; tMod += 2; addLog(`> ${mammal.name} przyszedł się napić.`, "#ff6666");
+              } else {
+                  addLog(`> ${mammal.name} zjadł jedzenie.`, "#ffaa00"); setDetritus(d => d + 5); 
+              }
+          } else if (currentSeason === 'Lato' || currentSeason === 'Wiosna') { 
+              if (state.toxicity < state.maxCapacity * 0.8) {
+                  visitorData = { color: 0x2ecc71, name: 'Rzekotka', duration: 6, type: 'FROG' };
+                  rX = (Math.random() > 0.5 ? 1 : -1) * (5 + Math.random() * 3);
+                  rZ = (Math.random() - 0.5) * 12;
+                  addLog(`> Rzekotka drzewna odpoczywa w wodzie.`, "#44ff44"); tMod -= 5;
+              }
+          }
+
+          if (visitorData) {
+              engine.current.visitors.push({ id: Date.now().toString(), ...visitorData, timer: visitorData.duration, x: rX, z: rZ });
+          }
+      }
+
+      if (state.leaves.length > 0) setDetritus(prev => prev + state.leaves.length);
+
+      const eatenLeaves = state.leaves.filter(l => l.userData.eaten);
+      if (eatenLeaves.length > 0) {
+          setDetritus(d => d + eatenLeaves.length * 8);
+          state.leaves = state.leaves.filter(l => !l.userData.eaten); 
+      }
+
+      setOxygen(prev => Math.max(0, Math.min(state.maxCapacity, prev + oMod + rainOxygenBonus)));
+      setToxicity(prev => Math.max(0, Math.min(state.maxCapacity, prev + tMod)));
+      setWater(prev => Math.max(0, Math.min(state.maxCapacity, prev + wMod + rainWaterBonus)));
+      setDay(d => d + 1);
+      setScore(s => s + 10);
+
+    }, 1000);
+    return () => clearInterval(gameTick);
+  }, [gameState]);
+
+  useEffect(() => {
+    if (gameState !== 'PLAYING') return;
+    let reason = '';
+    if (water <= 0) reason = 'Dendrotelma wyschła na pieprz.';
+    else if (oxygen <= 0 || isNaN(oxygen)) reason = 'Brak tlenu. Życie zamarło.';
+    else if (toxicity >= maxCapacity) reason = 'Krytyczny poziom zgnilizny zatruł całą wodę.';
+
+    if (reason) {
+        setGameState('GAMEOVER'); setCause(reason);
+        const newScoreObj = { score, days: day, location: locationName, date: new Date().toLocaleDateString() };
+        const newBoard = [...leaderboard, newScoreObj].sort((a, b) => b.score - a.score).slice(0, 5); 
+        setLeaderboard(newBoard); localStorage.setItem('dendrotelma_scores', JSON.stringify(newBoard));
+    }
+  }, [water, oxygen, toxicity, gameState, day, score, locationName, leaderboard, maxCapacity]);
+
+  const startGame = () => {
+      setMaxCapacity(100); setWater(60); setOxygen(40); setToxicity(0); setDetritus(0); setScore(0); setDay(1); setAlgae(0); setLarvae(2); setUpgrades({moss: 0, fungi: 0, insects: 0}); setCameraLogs([]);
+      fetchWeather();
+      if (sceneGroups.current.interact) { engine.current.leaves.forEach(l => sceneGroups.current.interact.remove(l)); engine.current.leaves = []; }
+      if (sceneGroups.current.visual) { [...sceneGroups.current.visual.children].forEach(c => sceneGroups.current.visual.remove(c)); }
+      if (sceneGroups.current.animals) { [...sceneGroups.current.animals.children].forEach(c => sceneGroups.current.animals.remove(c)); engine.current.visitors = []; }
+      setGameState('PLAYING'); addLog("> System połączony. Zapis włączony.", "#8fdf8f");
+  };
+
+  const buyAlgae = () => { if (water >= 20 && gameState === 'PLAYING') { setWater(w => w - 20); setAlgae(a => a + 1); } };
+  const buyLarvae = () => { if (oxygen >= 30 && gameState === 'PLAYING') { setOxygen(o => o - 30); setLarvae(l => l + 1); } };
+  const buyMoss = () => { if (detritus >= 80 && gameState === 'PLAYING') { setDetritus(d => d - 80); setUpgrades(u => ({...u, moss: u.moss + 1})); } };
+  const buyFungi = () => { if (detritus >= 120 && gameState === 'PLAYING') { setDetritus(d => d - 120); setUpgrades(u => ({...u, fungi: u.fungi + 1})); } };
+  const buyInsects = () => { if (detritus >= 200 && gameState === 'PLAYING') { setDetritus(d => d - 200); setUpgrades(u => ({...u, insects: u.insects + 1})); } };
+  const buyCapacity = () => { if (detritus >= 250 && gameState === 'PLAYING') { setDetritus(d => d - 250); setMaxCapacity(m => m + 50); } };
+
+  // --- THREE.JS ---
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0; 
+    mount.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0a110a);
+    scene.fog = new THREE.FogExp2(0x0a110a, 0.03);
+
+    const camera = new THREE.PerspectiveCamera(65, mount.clientWidth / mount.clientHeight, 0.1, 100);
+    camera.position.set(0, 15, 0); camera.lookAt(0, -10, 0); 
+
+    const composer = new EffectComposer(renderer); 
+    composer.addPass(new RenderPass(scene, camera));
+    
+    composer.addPass(new UnrealBloomPass(new THREE.Vector2(mount.clientWidth, mount.clientHeight), 0.1, 0.1, 0.8));
+    const ecosystemPass = new ShaderPass(EcosystemShader); composer.addPass(ecosystemPass);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    const dirLight = new THREE.DirectionalLight(0xeeddcc, 3.0); dirLight.position.set(5, 20, 5); scene.add(dirLight);
+    const deepLight = new THREE.PointLight(0x22ff88, 50, 40); deepLight.position.set(0, -5, 0); scene.add(deepLight);
+
+    const woodMat = new THREE.MeshStandardMaterial({ map: createWoodTexture(), side: THREE.DoubleSide, roughness: 0.9, color: 0xcccccc });
+    const trunkGeo = new THREE.CylinderGeometry(10, 12, 40, 32, 16, true);
+    const posAttribute = trunkGeo.attributes.position;
+    for (let i = 0; i < posAttribute.count; i++) {
+        let x = posAttribute.getX(i), y = posAttribute.getY(i), z = posAttribute.getZ(i);
+        let r = Math.sqrt(x*x + z*z) + Math.sin(Math.atan2(z, x) * 10) * 0.8 + Math.cos(y * 0.5) * 0.5;
+        posAttribute.setX(i, Math.cos(Math.atan2(z, x)) * r); posAttribute.setZ(i, Math.sin(Math.atan2(z, x)) * r);
+    }
+    trunkGeo.computeVertexNormals(); scene.add(new THREE.Mesh(trunkGeo, woodMat));
+
+    const waterGeo = new THREE.PlaneGeometry(26, 26, 64, 64);
+    const waterMat = new THREE.MeshStandardMaterial({ color: 0x114422, transparent: true, opacity: 0.85, roughness: 0.1, metalness: 0.6 });
+    const waterMesh = new THREE.Mesh(waterGeo, waterMat); waterMesh.rotation.x = -Math.PI / 2; scene.add(waterMesh);
+    
+    const bottom = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.MeshBasicMaterial({color: 0x051105}));
+    bottom.rotation.x = -Math.PI / 2; bottom.position.y = -15; scene.add(bottom);
+
+    const rainGeo = new THREE.BufferGeometry(); const rainCount = 800; const rainPos = new Float32Array(rainCount * 3);
+    for(let i=0; i<rainCount*3; i++) { rainPos[i*3] = (Math.random() - 0.5)*20; rainPos[i*3+1] = Math.random()*20; rainPos[i*3+2] = (Math.random() - 0.5)*20; }
+    rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+    const rainMat = new THREE.PointsMaterial({ color: 0x88ccff, size: 0.15, transparent: true, opacity: 0.4 }); 
+    const rain = new THREE.Points(rainGeo, rainMat); scene.add(rain);
+
+    const interactGroup = new THREE.Group(); scene.add(interactGroup); sceneGroups.current.interact = interactGroup;
+    const visualGroup = new THREE.Group(); scene.add(visualGroup); sceneGroups.current.visual = visualGroup;
+    const animalsGroup = new THREE.Group(); scene.add(animalsGroup); sceneGroups.current.animals = animalsGroup;
+
+    const raycaster = new THREE.Raycaster(); const mouse = new THREE.Vector2();
+    let isDragging = false; let lastMouse = new THREE.Vector2();
+
+    const onPointerDown = (event) => {
+        if (engine.current.state !== 'PLAYING') return;
+        isDragging = true;
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1; mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        lastMouse.copy(mouse); raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(interactGroup.children);
+        if (intersects.length > 0) {
+            interactGroup.remove(intersects[0].object);
+            engine.current.leaves = engine.current.leaves.filter(l => l.uuid !== intersects[0].object.uuid);
+            setToxicity(t => Math.max(0, t - 5)); setScore(s => s + 50); setDetritus(d => d + 10);
+        }
+    };
+
+    const onPointerMove = (event) => {
+        if (engine.current.state !== 'PLAYING') return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1; mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        if (isDragging) {
+            const dist = mouse.distanceTo(lastMouse);
+            if (dist > 0.005) {
+                engine.current.stirIntensity = Math.min(1.0, engine.current.stirIntensity + dist * 8); engine.current.stirring = true;
+                setOxygen(o => Math.min(engine.current.maxCapacity, o + dist * 35)); 
+                if (engine.current.season !== 'Zima') setWater(w => Math.max(0, w - dist * 1.5));
+            }
+            lastMouse.copy(mouse);
+        }
+    };
+    const onPointerUp = () => { isDragging = false; engine.current.stirring = false; };
+
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove); window.addEventListener('pointerup', onPointerUp);
+
+    let animationId; const clock = new THREE.Clock(); let leafSpawnTimer = 0;
+
+    const animate = () => {
+      animationId = requestAnimationFrame(animate);
+      const delta = clock.getDelta(); const time = clock.getElapsedTime(); const state = engine.current;
+
+      camera.position.x = Math.sin(time * 0.05) * 3; camera.position.z = Math.cos(time * 0.08) * 3; camera.lookAt(0, waterMesh.position.y - 2, 0);
+
+      ecosystemPass.uniforms.time.value = time; ecosystemPass.uniforms.toxicity.value = state.toxicity / state.maxCapacity;
+      ecosystemPass.uniforms.hypoxia.value = Math.max(0, (40 - state.oxygen) / 40); ecosystemPass.uniforms.stirIntensity.value = state.stirIntensity;
+
+      if (state.season === 'Zima') { waterMat.color.lerp(new THREE.Color(0xaaddff), 0.02); waterMat.roughness = 0.8;
+      } else { const toxColor = new THREE.Color().setHSL(0.35 - (Math.min(state.maxCapacity * 0.8, state.toxicity)/state.maxCapacity), 0.8, 0.2); waterMat.color.lerp(toxColor, 0.05); waterMat.roughness = 0.1; }
+
+      const waveSpeed = state.season === 'Zima' ? 0.1 : 1.0; 
+      const positions = waterGeo.attributes.position;
+      for (let i = 0; i < positions.count; i++) {
+          const x = positions.getX(i); const y = positions.getY(i);
+          positions.setZ(i, Math.sin(x*1.0 + time*2*waveSpeed)*0.2 + Math.cos(y*1.0 + time*1.5*waveSpeed)*0.2 + Math.sin(x*8 + time*15)*state.stirIntensity*0.4);
+      }
+      positions.needsUpdate = true; waterGeo.computeVertexNormals();
+
+      if (state.state === 'PLAYING') {
+          if (!state.stirring) state.stirIntensity = Math.max(0, state.stirIntensity - delta * 0.8);
+          const targetWaterY = -12 + (state.water / state.maxCapacity) * 18; waterMesh.position.y += (targetWaterY - waterMesh.position.y) * 0.05;
+
+          rain.visible = state.isRaining;
+          if (state.isRaining) {
+              const isSnow = state.season === 'Zima'; rainMat.color.setHex(isSnow ? 0xffffff : 0x88ccff);
+              const rArr = rainGeo.attributes.position.array;
+              for(let i=0; i<rainCount; i++) {
+                  rArr[i*3 + 1] -= delta * (isSnow ? 8 : 25);
+                  if(isSnow) rArr[i*3] += Math.sin(time*2 + i)*0.03; 
+                  if(rArr[i*3 + 1] < waterMesh.position.y) rArr[i*3 + 1] = 20;
+              }
+              rainGeo.attributes.position.needsUpdate = true;
+          }
+
+          leafSpawnTimer -= delta;
+          const maxLeaves = state.season === 'Jesień' ? 12 : (state.season === 'Zima' ? 0 : 6);
+          if (leafSpawnTimer <= 0 && state.leaves.length < maxLeaves) {
+              leafSpawnTimer = state.season === 'Jesień' ? 1 + Math.random()*2 : 3 + Math.random()*5;
+              const leaf = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 2.0), new THREE.MeshStandardMaterial({ map: createLeafTexture(), roughness: 0.6, side: THREE.DoubleSide, transparent: true }));
+              const a = Math.random() * Math.PI * 2; const r = Math.random() * 6;
+              leaf.position.set(Math.cos(a)*r, 15, Math.sin(a)*r); leaf.rotation.set(Math.random(), Math.random(), Math.random());
+              leaf.userData = { eaten: false }; interactGroup.add(leaf); state.leaves.push(leaf);
+          }
+
+          interactGroup.children.forEach(leaf => {
+              if (leaf.position.y > waterMesh.position.y) { leaf.position.y -= delta * 5; leaf.rotation.x += delta * 2;
+              } else { leaf.position.y = waterMesh.position.y + 0.1; leaf.position.x += Math.sin(time + leaf.id) * 0.005; leaf.material.color.lerp(new THREE.Color(0x221100), 0.005); }
+          });
+
+          state.visitors.forEach((v, idx) => {
+              v.timer -= delta;
+              let animGroup = animalsGroup.children.find(c => c.name === v.id);
+              
+              if (!animGroup && v.timer > 0) {
+                  if (v.type === 'BIRD' && modelsCache.current[v.file]) {
+                      animGroup = new THREE.Group();
+                      const glbClone = modelsCache.current[v.file].clone();
+                      animGroup.add(glbClone);
+                  } else {
+                      animGroup = createProceduralAnimal(v.type, v.color);
+                  }
+                  
+                  animGroup.name = v.id;
+                  
+                  const label = makeTextSprite(v.name, '#fff');
+                  label.position.y = 1.0; 
+                  animGroup.add(label);
+
+                  animGroup.position.set(v.x, waterMesh.position.y + 0.5, v.z);
+                  animalsGroup.add(animGroup);
+              } else if (animGroup && v.timer > 0) {
+                  animGroup.position.y = waterMesh.position.y + 0.5;
+                  
+                  animGroup.lookAt(0, animGroup.position.y, 0);
+                  
+                  const label = animGroup.children.find(c => c.isSprite);
+                  if (label) {
+                      label.lookAt(camera.position); 
+                  }
+              } else if (animGroup && v.timer <= 0) {
+                  animalsGroup.remove(animGroup); state.visitors.splice(idx, 1);
+              }
+          });
+
+          while(visualGroup.children.filter(c=>c.name==='algae').length < state.algae) {
+              const aGroup = new THREE.Group(); aGroup.name = 'algae';
+              const a = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), new THREE.MeshStandardMaterial({ color: 0x44ff44, emissive: 0x11aa11, emissiveIntensity: 0.15 }));
+              aGroup.add(a); 
+              const label = makeTextSprite('🌿 Glon', '#44ff44'); label.position.y = 0.7; aGroup.add(label);
+              aGroup.userData = { offset: Math.random() * 10, radius: 1 + Math.random()*7 }; visualGroup.add(aGroup);
+          }
+          while(visualGroup.children.filter(c=>c.name==='larva').length < state.larvae) {
+              const lGroup = new THREE.Group(); lGroup.name = 'larva';
+              const l = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.8, 4, 8), new THREE.MeshStandardMaterial({ color: 0xffaa44, emissive: 0xdd6600, emissiveIntensity: 0.15 }));
+              l.rotation.x = Math.PI/2; lGroup.add(l); 
+              const label = makeTextSprite('🐛 Larwa', '#ffaa44'); label.position.y = 0.7; lGroup.add(label);
+              lGroup.userData = { tx: 0, tz: 0, timer: 0, targetLeaf: null }; visualGroup.add(lGroup);
+          }
+          
+          visualGroup.children.forEach(obj => {
+              if (obj.name === 'algae') { 
+                  obj.position.set(Math.sin(time*0.3 + obj.userData.offset)*obj.userData.radius, waterMesh.position.y - 0.5 + Math.sin(time*2 + obj.userData.offset)*0.2, Math.cos(time*0.3 + obj.userData.offset)*obj.userData.radius);
+                  const label = obj.children.find(c=>c.isSprite); if(label) label.lookAt(camera.position);
+              } else if (obj.name === 'larva') {
+                  obj.userData.timer -= delta;
+                  if(obj.userData.timer <= 0) { 
+                      let nearest = null; let minDist = 999;
+                      state.leaves.forEach(l => { if (!l.userData.eaten) { let d = obj.position.distanceTo(l.position); if (d < minDist) { minDist = d; nearest = l; } } });
+                      
+                      if (nearest && minDist < 8) { obj.userData.targetLeaf = nearest; obj.userData.tx = nearest.position.x; obj.userData.tz = nearest.position.z;
+                      } else { obj.userData.targetLeaf = null; obj.userData.tx = (Math.random()-0.5)*14; obj.userData.tz = (Math.random()-0.5)*14; }
+                      obj.userData.timer = 1+Math.random()*2; 
+                  }
+                  
+                  obj.position.x += (obj.userData.tx - obj.position.x) * 0.04; obj.position.z += (obj.userData.tz - obj.position.z) * 0.04;
+                  obj.position.y = waterMesh.position.y - 1.5;
+                  
+                  const mesh = obj.children[0]; mesh.lookAt(obj.userData.tx, mesh.position.y, obj.userData.tz);
+                  const label = obj.children.find(c=>c.isSprite); if(label) label.lookAt(camera.position);
+
+                  if (obj.userData.targetLeaf && obj.position.distanceTo(obj.userData.targetLeaf.position) < 2.0 && !obj.userData.targetLeaf.userData.eaten) {
+                      obj.userData.targetLeaf.scale.subScalar(delta * 0.15); 
+                      mesh.rotation.z = Math.sin(time * 30) * 0.3; 
+                      
+                      if (obj.userData.targetLeaf.scale.x <= 0.1) {
+                          obj.userData.targetLeaf.userData.eaten = true;
+                          obj.userData.targetLeaf.visible = false;
+                          obj.userData.targetLeaf = null;
+                      }
+                  }
+              }
+          });
+      }
+      composer.render();
+    };
+    animate();
+
+    const onResize = () => { camera.aspect = mount.clientWidth / mount.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(mount.clientWidth, mount.clientHeight); composer.setSize(mount.clientWidth, mount.clientHeight); };
+    window.addEventListener('resize', onResize);
+
+    return () => {
+      cancelAnimationFrame(animationId); window.removeEventListener('resize', onResize);
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown); window.removeEventListener('pointermove', onPointerMove); window.removeEventListener('pointerup', onPointerUp);
+      if(mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement); renderer.dispose();
+    };
+  }, []);
+
+  const barStyle = (val, color) => ({ width: `${Math.min(100, (val / maxCapacity) * 100)}%`, height: '10px', backgroundColor: color, transition: 'width 0.2s linear', boxShadow: `0 0 8px ${color}` });
+  const btnStyle = { background: 'transparent', border: '1px solid #2ecc71', color: '#2ecc71', padding: '10px 20px', cursor: 'pointer', textTransform: 'uppercase', fontSize: '12px', display: 'block', width: '100%', marginBottom: '10px', pointerEvents: 'auto', fontFamily: "inherit", letterSpacing: '1px', transition: '0.2s' };
+  const panelStyle = { background: 'rgba(0, 10, 0, 0.65)', padding: '15px', border: '1px solid #1a4a1a', pointerEvents: 'auto', fontFamily: "'Courier New', monospace", backdropFilter: 'blur(2px)' };
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden', fontFamily: "'Consolas', 'Courier New', monospace", color: '#44ff44' }}>
+      <div ref={mountRef} style={{ width: '100%', height: '100%', position: 'absolute', zIndex: 1, touchAction: 'none' }} />
+
+      {(gameState === 'PLAYING' || gameState === 'PAUSED') && (
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none', zIndex: 10, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '20px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', width: '300px' }}>
+                    
+                    <div style={{...panelStyle, borderLeft: '3px solid #2ecc71'}}>
+                        <h1 style={{ margin: 0, color: '#2ecc71', letterSpacing: '2px', fontSize: '18px', textShadow: '0 0 5px #2ecc71' }}>[ DENDROTELMA_OS ]</h1>
+                        <div style={{ margin: '10px 0', fontSize: '12px', color: '#88cc88' }}>
+                            <div>WIEK: <span style={{color: '#fff'}}>{day} DNI</span></div>
+                            <div>PUNKTY: <span style={{color: '#f1c40f'}}>{score}</span></div>
+                            <div>SEZON: <span style={{color: season==='Zima'?'#3498db':season==='Lato'?'#f1c40f':season==='Jesień'?'#e67e22':'#2ecc71'}}>{season.toUpperCase()}</span></div>
+                        </div>
+                        
+                        <div style={{ marginTop: '10px', fontSize: '11px', color: '#aaa', borderTop: '1px solid #1a4a1a', paddingTop: '10px' }}>
+                            <div>GEO: {locationName.toUpperCase()}</div>
+                            <div>TEMP: {Math.round(gameTemp)}°C | STAT: {isRaining ? (season==='Zima'?'ŚNIEG':'DESZCZ') : 'SUCHO'}</div>
+                        </div>
+                        <button onClick={() => setGameState('PAUSED')} style={{...btnStyle, padding: '5px', marginTop: '15px', fontSize: '10px', marginBottom: 0, borderColor: '#f1c40f', color: '#f1c40f'}}>⏸ PAUZA</button>
+                    </div>
+
+                    <div style={{...panelStyle, borderLeft: '3px solid #8fdf8f'}}>
+                        <h3 style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#8fdf8f' }}>CAM_LINK // LOGI</h3>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            {cameraLogs.length === 0 ? <span style={{fontSize: '10px', color: '#2a5a2a'}}>&gt; Oczekiwanie na ruch...</span> : cameraLogs.map(log => (
+                                <div key={log.id} style={{ fontSize: '10px', color: log.color, borderLeft: `1px solid ${log.color}`, paddingLeft: '5px' }}>{log.text}</div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', width: '280px' }}>
+                    
+                    <div style={{...panelStyle, borderRight: '3px solid #3498db'}}>
+                        <div style={{ marginBottom: '12px' }}>
+                            <div style={{ fontSize: '10px', marginBottom: '3px', color: water<30?'#ff4444':'#aaa' }}>H2O ({Math.round(water)}/{maxCapacity})</div>
+                            <div style={{ background: '#051005', height: '10px', border: '1px solid #1a4a1a' }}><div style={barStyle(water, '#3498db')} /></div>
+                        </div>
+                        <div style={{ marginBottom: '12px' }}>
+                            <div style={{ fontSize: '10px', marginBottom: '3px', color: oxygen<30?'#ff4444':'#aaa' }}>O2 ({Math.round(oxygen)}/{maxCapacity})</div>
+                            <div style={{ background: '#051005', height: '10px', border: '1px solid #1a4a1a' }}><div style={barStyle(oxygen, '#2ecc71')} /></div>
+                        </div>
+                        <div>
+                            <div style={{ fontSize: '10px', marginBottom: '3px', color: toxicity>maxCapacity*0.8?'#ff4444':'#aaa' }}>TOX ({Math.round(toxicity)}/{maxCapacity}) {toxicity>maxCapacity*0.8&&'!!'}</div>
+                            <div style={{ background: '#051005', height: '10px', border: '1px solid #1a4a1a' }}><div style={barStyle(toxicity, toxicity > maxCapacity * 0.8 ? '#ff0000' : '#e74c3c')} /></div>
+                        </div>
+                    </div>
+                    
+                    <div style={{...panelStyle, borderRight: '3px solid #e67e22', position: 'relative' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                            <h3 style={{ margin: 0, fontSize: '12px', color: '#e67e22' }}>AUTOMATYZACJA</h3>
+                            <div onMouseEnter={() => setShowTooltip(true)} onMouseLeave={() => setShowTooltip(false)} style={{ position: 'relative' }}>
+                                <button style={{ background: 'transparent', border: '1px solid #e67e22', color: '#e67e22', width: '20px', height: '20px', fontSize: '10px', cursor: 'help', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>?</button>
+                                {showTooltip && (
+                                    <div style={{ position: 'absolute', top: '-110px', right: '0', background: 'rgba(0,10,0,0.95)', border: '1px solid #e67e22', padding: '10px', fontSize: '10px', width: '220px', zIndex: 100, color: '#aaa' }}>
+                                        <strong style={{color: '#f1c40f'}}>DETRYTUS [D]</strong>: Martwa materia. Klikaj w liście lub czekaj aż zjedzą je larwy.<br/><br/>
+                                        <strong style={{color: '#2ecc71'}}>GLONY</strong>: H2O -&gt; O2<br/>
+                                        <strong style={{color: '#e74c3c'}}>LARWY</strong>: O2 -&gt; Usuwa TOX/Liście
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        <div style={{ fontSize: '10px', color: '#fff', marginBottom: '10px' }}>DETRYTUS: <strong style={{fontSize:'14px', color:'#f1c40f'}}>{detritus}</strong> D</div>
+                        
+                        <button onClick={buyCapacity} style={detritus >= 250 ? {...btnStyle, borderColor: '#f1c40f', color: '#f1c40f'} : {...btnStyle, opacity: 0.2, borderColor: '#f1c40f', color: '#f1c40f'}}>
+                            [POJEMNOŚĆ +50] : 250D
+                        </button>
+                        <button onClick={buyMoss} style={detritus >= 80 ? btnStyle : {...btnStyle, opacity: 0.2}}>
+                            [MCHY: {upgrades.moss}] : 80D
+                        </button>
+                        <button onClick={buyFungi} style={detritus >= 120 ? btnStyle : {...btnStyle, opacity: 0.2}}>
+                            [GRZYBY: {upgrades.fungi}] : 120D
+                        </button>
+                        <button onClick={buyInsects} style={detritus >= 200 ? btnStyle : {...btnStyle, opacity: 0.2, marginBottom: 0}}>
+                            [OCHOTKI: {upgrades.insects}] : 200D
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '20px' }}>
+                <button style={water >= 20 ? {...btnStyle, width: '200px', borderColor: '#3498db', color: '#3498db'} : {...btnStyle, width: '200px', opacity: 0.3, borderColor: '#3498db', color: '#3498db'}} onClick={buyAlgae}>
+                    + DODAJ GLON (20 H2O)
+                </button>
+                <button style={oxygen >= 30 ? {...btnStyle, width: '200px', borderColor: '#e74c3c', color: '#e74c3c'} : {...btnStyle, width: '200px', opacity: 0.3, borderColor: '#e74c3c', color: '#e74c3c'}} onClick={buyLarvae}>
+                    + DODAJ LARWĘ (30 O2)
+                </button>
+            </div>
+        </div>
+      )}
+
+      {gameState !== 'PLAYING' && (
+        <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0, 5, 0, 0.85)', zIndex: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(5px)' }}>
+            <div style={{ background: 'rgba(0, 10, 0, 0.95)', padding: '40px', border: '1px solid #2ecc71', width: '350px', textAlign: 'center', boxShadow: '0 0 20px rgba(46, 204, 113, 0.2)' }}>
+                {gameState === 'MENU' && (
+                    <>
+                        <h1 style={{ color: '#2ecc71', fontSize: '28px', margin: '0 0 5px 0', letterSpacing: '4px' }}>DENDROTELMA</h1>
+                        <p style={{ color: '#5a8a5a', marginBottom: '30px', fontSize: '10px', letterSpacing: '1px' }}>SYMULATOR EKOSYSTEMU V3.0</p>
+                        <button style={btnStyle} onClick={startGame}>[ URUCHOM SYSTEM ]</button>
+                        <button style={{...btnStyle, borderColor: '#555', color: '#aaa'}} onClick={() => setGameState('LEADERBOARD')}>[ BAZA WYNIKÓW ]</button>
+                    </>
+                )}
+                {gameState === 'PAUSED' && (
+                    <>
+                        <h2 style={{ color: '#f1c40f', fontSize: '24px', marginBottom: '30px', letterSpacing: '2px' }}>SYSTEM WSTRZYMANY</h2>
+                        <button style={btnStyle} onClick={() => setGameState('PLAYING')}>[ WZNÓW ]</button>
+                        <button style={{...btnStyle, borderColor: '#e74c3c', color: '#e74c3c'}} onClick={() => setGameState('MENU')}>[ PRZERWIJ ]</button>
+                    </>
+                )}
+                {gameState === 'GAMEOVER' && (
+                    <>
+                        <h2 style={{ color: '#e74c3c', fontSize: '24px', margin: '0 0 10px 0', letterSpacing: '2px' }}>AWARIA SYSTEMU</h2>
+                        <p style={{ fontSize: '12px', color: '#ffaaaa', marginBottom: '20px' }}>{cause}</p>
+                        <div style={{ border: '1px dotted #e74c3c', padding: '15px', marginBottom: '25px', color: '#fff' }}>
+                            <p style={{ margin: '0 0 5px 0', fontSize: '12px' }}>CZAS TRWANIA: {day} DNI</p>
+                            <p style={{ margin: 0, color: '#f1c40f', fontSize: '16px' }}>WYNIK KOŃCOWY: {score}</p>
+                        </div>
+                        <button style={btnStyle} onClick={startGame}>[ RESTART ]</button>
+                        <button style={{...btnStyle, borderColor: '#555', color: '#aaa'}} onClick={() => setGameState('LEADERBOARD')}>[ BAZA WYNIKÓW ]</button>
+                    </>
+                )}
+                {gameState === 'LEADERBOARD' && (
+                    <>
+                        <h2 style={{ color: '#3498db', fontSize: '20px', marginBottom: '20px', letterSpacing: '2px' }}>NAJLEPSZE ZAPISY</h2>
+                        {leaderboard.length === 0 ? <p style={{ color: '#555', marginBottom: '30px', fontSize: '12px' }}>Brak danych.</p> : (
+                            <div style={{ textAlign: 'left', marginBottom: '25px', maxHeight: '200px', overflowY: 'auto' }}>
+                                {leaderboard.map((entry, idx) => (
+                                    <div key={idx} style={{ padding: '8px', marginBottom: '5px', borderBottom: '1px solid #1a4a1a', fontSize: '10px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', color: idx===0?'#f1c40f':'#2ecc71', fontWeight: 'bold' }}>
+                                            <span>#{idx + 1} PKT: {entry.score}</span><span style={{color: '#555'}}>{entry.date}</span>
+                                        </div>
+                                        <div style={{ color: '#888', marginTop: '3px' }}>DNI: {entry.days} | LOC: {entry.location.split(',')[0].toUpperCase()}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        <button style={btnStyle} onClick={() => setGameState('MENU')}>[ POWRÓT ]</button>
+                    </>
+                )}
+            </div>
+        </div>
+      )}
+    </div>
+  );
+} 

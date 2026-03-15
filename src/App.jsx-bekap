@@ -1,0 +1,462 @@
+import React, { useState, useEffect, useRef } from 'react';
+import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+
+// ─── BEZPIECZNY SHADER (Tylko zniekształcenia, bez przyciemniania) ────
+const EcosystemShader = {
+  uniforms: {
+    "tDiffuse": { value: null },
+    "time": { value: 0.0 },
+    "toxicity": { value: 0.0 },
+    "stirIntensity": { value: 0.0 }
+  },
+  vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float time; uniform float toxicity; uniform float stirIntensity;
+    varying vec2 vUv;
+    void main() {
+      vec2 uv = vUv;
+      
+      // Drgania od mieszania wody
+      uv.x += sin(uv.y * 20.0 + time * 10.0) * (0.005 * stirIntensity);
+      
+      // Powolne falowanie od zgnilizny
+      float wave = sin(uv.y * 10.0 + time * 2.0) * (0.01 * toxicity);
+      uv.x += wave;
+      
+      // Delikatne rozmycie barw
+      float shift = 0.005 * toxicity + (0.005 * stirIntensity);
+      vec4 color = vec4(0.0);
+      color.r = texture2D(tDiffuse, vec2(uv.x + shift, uv.y)).r;
+      color.g = texture2D(tDiffuse, uv).g;
+      color.b = texture2D(tDiffuse, vec2(uv.x - shift, uv.y)).b;
+      color.a = 1.0;
+      
+      // Lekka winieta na brzegach ekranu (by skupić wzrok na środku)
+      vec2 center = vUv - 0.5;
+      float dist = length(center);
+      color.rgb *= smoothstep(0.9, 0.4, dist);
+      
+      gl_FragColor = color;
+    }
+  `
+};
+
+// ─── GENERATOR TEKSTURY KORY ──────────────────────────────────────────
+function createBarkTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = 512; canvas.height = 512;
+    const ctx = canvas.getContext("2d");
+    
+    // Tło (jasny brąz/szarość spróchniałego drewna)
+    ctx.fillStyle = "#4a3525"; 
+    ctx.fillRect(0, 0, 512, 512);
+    
+    // Pionowe pęknięcia kory
+    for(let i=0; i<800; i++) {
+        ctx.fillStyle = Math.random() > 0.5 ? "#2c1e14" : "#5e4532";
+        ctx.fillRect(Math.random()*512, Math.random()*512, 2 + Math.random()*4, 20 + Math.random()*80);
+    }
+
+    // Zielone plamy mchu na drewnie
+    for(let i=0; i<150; i++) {
+        ctx.fillStyle = `rgba(60, 90, 40, ${Math.random() * 0.5})`;
+        ctx.beginPath();
+        ctx.ellipse(Math.random()*512, Math.random()*512, 5 + Math.random()*15, 10 + Math.random()*30, 0, 0, Math.PI*2);
+        ctx.fill();
+    }
+    
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(4, 2);
+    return tex;
+}
+
+// ─── GŁÓWNY KOMPONENT ─────────────────────────────────────────────────
+export default function Dendrotelma3D() {
+  const mountRef = useRef(null);
+  
+  const [water, setWater] = useState(60);
+  const [oxygen, setOxygen] = useState(60);
+  const [toxicity, setToxicity] = useState(0);
+  const [day, setDay] = useState(1);
+  const [gameOver, setGameOver] = useState(false);
+  const [cause, setCause] = useState('');
+  const [score, setScore] = useState(0);
+
+  const [algae, setAlgae] = useState(0);
+  const [larvae, setLarvae] = useState(0);
+  
+  const engine = useRef({ 
+      water, oxygen, toxicity, algae, larvae, 
+      stirring: false, stirIntensity: 0, leaves: [], score: 0
+  });
+
+  useEffect(() => {
+      engine.current = { ...engine.current, water, oxygen, toxicity, algae, larvae, score };
+  }, [water, oxygen, toxicity, algae, larvae, score]);
+
+  useEffect(() => {
+    if (gameOver) return;
+    const gameTick = setInterval(() => {
+      const state = engine.current;
+      const oMod = (state.algae * 1.5) - (state.larvae * 1.0) - (state.leaves.length * 1.5);
+      const tMod = (state.leaves.length * 2.0) - (state.larvae * 1.5);
+      const wMod = -1 - (state.algae * 0.5);
+
+      setOxygen(prev => Math.max(0, Math.min(100, prev + oMod)));
+      setToxicity(prev => Math.max(0, Math.min(100, prev + tMod)));
+      setWater(prev => Math.max(0, Math.min(100, prev + wMod)));
+      
+      setDay(d => d + 1);
+      setScore(s => s + 10);
+    }, 1000);
+    return () => clearInterval(gameTick);
+  }, [gameOver]);
+
+  useEffect(() => {
+    if (water <= 0) { setGameOver(true); setCause('Woda wyparowała.'); }
+    else if (oxygen <= 0) { setGameOver(true); setCause('Zabrakło tlenu.'); }
+    else if (toxicity >= 100) { setGameOver(true); setCause('Zgnilizna zatruła wodę.'); }
+  }, [water, oxygen, toxicity]);
+
+  // --- THREE.JS SETUP ---
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    mount.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1510); // Ciemnobrązowe tło
+    scene.fog = new THREE.Fog(0x1a1510, 15, 60); // Liniowa mgła, łagodniejsza
+
+    // Kamera zagląda w głąb pnia
+    const camera = new THREE.PerspectiveCamera(60, mount.clientWidth / mount.clientHeight, 0.1, 100);
+    camera.position.set(0, 12, 10);
+    camera.lookAt(0, -5, 0);
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const ecosystemPass = new ShaderPass(EcosystemShader);
+    composer.addPass(ecosystemPass);
+
+    // ─── OŚWIETLENIE (Klucz do tego, by przestało być ciemno) ───
+    // Główne, miękkie światło wypełniające całą dziurę
+    const hemiLight = new THREE.HemisphereLight(0xffffee, 0x112211, 1.2);
+    scene.add(hemiLight);
+    
+    // Światło z góry (Snop wpadający do dziury)
+    const topLight = new THREE.DirectionalLight(0xffeedd, 1.5);
+    topLight.position.set(2, 20, 2);
+    scene.add(topLight);
+
+    // Zielonkawe podświetlenie od strony wody
+    const waterLight = new THREE.PointLight(0x44aa66, 1.5, 30);
+    waterLight.position.set(0, 0, 0);
+    scene.add(waterLight);
+
+    // ─── BUDOWA DZIURY (Wielki Cylinder z widokiem od środka) ───
+    const trunkGeo = new THREE.CylinderGeometry(8, 12, 50, 64, 16, true);
+    const posAttribute = trunkGeo.attributes.position;
+    
+    // Deformacja wierzchołków, by przypominało organiczne drewno
+    for (let i = 0; i < posAttribute.count; i++) {
+        let x = posAttribute.getX(i);
+        let y = posAttribute.getY(i);
+        let z = posAttribute.getZ(i);
+        let angle = Math.atan2(z, x);
+        
+        // Zagięcia do wewnątrz pnia (falowanie)
+        let radiusOffset = Math.sin(angle * 6) * 1.5 + Math.cos(y * 0.5) * 1.0;
+        
+        // Górna krawędź zwęża się z poszarpanymi brzegami
+        if (y > 10) {
+            radiusOffset -= (y - 10) * 0.3;
+            radiusOffset += Math.sin(angle * 15) * 0.5; 
+        }
+
+        let r = Math.sqrt(x*x + z*z) + radiusOffset;
+        posAttribute.setXYZ(i, Math.cos(angle) * r, y, Math.sin(angle) * r);
+    }
+    trunkGeo.computeVertexNormals();
+
+    const trunkMat = new THREE.MeshStandardMaterial({ 
+        map: createBarkTexture(),
+        side: THREE.BackSide, // Widzimy go od środka
+        roughness: 1.0,
+        color: 0xffffff
+    });
+    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+    trunk.position.y = -5;
+    scene.add(trunk);
+
+    // ─── WODA (Przejrzysta i falująca) ───
+    const waterGeo = new THREE.PlaneGeometry(30, 30, 64, 64);
+    const waterMat = new THREE.MeshStandardMaterial({ 
+        color: 0x1f4c2c, 
+        transparent: true, 
+        opacity: 0.85, 
+        roughness: 0.2,
+        metalness: 0.3
+    });
+    const waterMesh = new THREE.Mesh(waterGeo, waterMat);
+    waterMesh.rotation.x = -Math.PI / 2;
+    scene.add(waterMesh);
+
+    // Dno pod wodą (ciemne, mszyste)
+    const bottom = new THREE.Mesh(
+        new THREE.PlaneGeometry(40, 40), 
+        new THREE.MeshStandardMaterial({color: 0x0a110a})
+    );
+    bottom.rotation.x = -Math.PI / 2;
+    bottom.position.y = -15;
+    scene.add(bottom);
+
+    const interactGroup = new THREE.Group(); scene.add(interactGroup);
+    const visualGroup = new THREE.Group(); scene.add(visualGroup);
+
+    // --- MINIGRY (Myszka) ---
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let isDragging = false;
+    let lastMouse = new THREE.Vector2();
+
+    const onPointerDown = (event) => {
+        isDragging = true;
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        lastMouse.copy(mouse);
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(interactGroup.children);
+        if (intersects.length > 0) {
+            const leaf = intersects[0].object;
+            interactGroup.remove(leaf);
+            engine.current.leaves = engine.current.leaves.filter(l => l.uuid !== leaf.uuid);
+            setToxicity(t => Math.max(0, t - 10));
+            setScore(s => s + 50);
+        }
+    };
+
+    const onPointerMove = (event) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+        if (isDragging) {
+            const dist = mouse.distanceTo(lastMouse);
+            if (dist > 0.005) {
+                engine.current.stirIntensity = Math.min(1.0, engine.current.stirIntensity + dist * 5);
+                engine.current.stirring = true;
+                setOxygen(o => Math.min(100, o + dist * 25));
+                setWater(w => Math.max(0, w - dist * 1.0));
+            }
+            lastMouse.copy(mouse);
+        }
+    };
+
+    const onPointerUp = () => { isDragging = false; engine.current.stirring = false; };
+
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+
+    // --- PĘTLA ANIMACJI ---
+    let animationId;
+    const clock = new THREE.Clock();
+    let leafSpawnTimer = 0;
+
+    const animate = () => {
+      animationId = requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      const time = clock.getElapsedTime();
+      const state = engine.current;
+
+      if (!state.stirring) state.stirIntensity = Math.max(0, state.stirIntensity - delta * 0.8);
+      
+      ecosystemPass.uniforms.time.value = time;
+      ecosystemPass.uniforms.toxicity.value = state.toxicity / 100;
+      ecosystemPass.uniforms.stirIntensity.value = state.stirIntensity;
+
+      // Pływanie kamery, żeby scena żyła
+      camera.position.x = Math.sin(time * 0.2) * 1.5;
+      camera.position.z = 10 + Math.cos(time * 0.2) * 1.5;
+      camera.lookAt(0, waterMesh.position.y - 2, 0);
+
+      // Poziom i kolor wody
+      const targetWaterY = -8 + (state.water / 100) * 12;
+      waterMesh.position.y += (targetWaterY - waterMesh.position.y) * 0.05;
+      
+      const toxColor = new THREE.Color().setHSL(0.35 - (state.toxicity/250), 0.6, 0.2); // Z zieleni w brunatny
+      waterMat.color.lerp(toxColor, 0.05);
+
+      // Falowanie (Vertex animation)
+      const positions = waterGeo.attributes.position;
+      for (let i = 0; i < positions.count; i++) {
+          const x = positions.getX(i);
+          const y = positions.getY(i);
+          const baseZ = Math.sin(x * 1.0 + time * 1.5) * 0.2 + Math.cos(y * 1.0 + time * 1.2) * 0.2;
+          const stirZ = Math.sin(x * 8 + time * 12) * state.stirIntensity * 0.4; 
+          positions.setZ(i, baseZ + stirZ);
+      }
+      positions.needsUpdate = true;
+      waterGeo.computeVertexNormals();
+
+      // Zgniłe liście spadające z góry
+      leafSpawnTimer -= delta;
+      if (leafSpawnTimer <= 0 && state.leaves.length < 6) {
+          leafSpawnTimer = 2 + Math.random() * 4; 
+          const leafGeo = new THREE.PlaneGeometry(1.5, 1.5);
+          // Liść jest jasny, by łatwo go było kliknąć
+          const leafMat = new THREE.MeshBasicMaterial({ color: 0xff8822, side: THREE.DoubleSide });
+          const leaf = new THREE.Mesh(leafGeo, leafMat);
+          
+          const angle = Math.random() * Math.PI * 2;
+          const r = Math.random() * 5;
+          leaf.position.set(Math.cos(angle)*r, 20, Math.sin(angle)*r);
+          leaf.rotation.set(Math.random(), Math.random(), Math.random());
+          
+          interactGroup.add(leaf);
+          state.leaves.push(leaf);
+      }
+
+      interactGroup.children.forEach(leaf => {
+          if (leaf.position.y > waterMesh.position.y + 0.1) {
+              leaf.position.y -= delta * 4; 
+              leaf.rotation.x += delta;
+          } else {
+              leaf.position.y = waterMesh.position.y + 0.1;
+              leaf.position.x += Math.sin(time + leaf.id) * 0.01;
+              leaf.material.color.lerp(new THREE.Color(0x442200), 0.01); // Gnije
+          }
+      });
+
+      // Glony (Tworzą jasne zielone punkty w wodzie)
+      while(visualGroup.children.filter(c=>c.name==='algae').length < state.algae) {
+          const a = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 8), new THREE.MeshBasicMaterial({ color: 0x44ff44 }));
+          a.name = 'algae';
+          a.userData = { offset: Math.random() * 10, radius: 1 + Math.random()*6 };
+          visualGroup.add(a);
+      }
+      
+      // Larwy (Ruchliwe, żółte robaki)
+      while(visualGroup.children.filter(c=>c.name==='larva').length < state.larvae) {
+          const l = new THREE.Mesh(new THREE.CapsuleGeometry(0.15, 0.6, 4, 8), new THREE.MeshBasicMaterial({ color: 0xffcc00 }));
+          l.name = 'larva';
+          l.userData = { tx: 0, tz: 0, timer: 0 };
+          visualGroup.add(l);
+      }
+
+      visualGroup.children.forEach(obj => {
+          if (obj.name === 'algae') {
+              obj.position.x = Math.sin(time * 0.4 + obj.userData.offset) * obj.userData.radius;
+              obj.position.z = Math.cos(time * 0.4 + obj.userData.offset) * obj.userData.radius;
+              obj.position.y = waterMesh.position.y - 0.2 + Math.sin(time * 2 + obj.userData.offset) * 0.2;
+          } else if (obj.name === 'larva') {
+              obj.userData.timer -= delta;
+              if(obj.userData.timer <= 0) {
+                  obj.userData.tx = (Math.random() - 0.5) * 12;
+                  obj.userData.tz = (Math.random() - 0.5) * 12;
+                  obj.userData.timer = 0.5 + Math.random() * 1.5; // Szybkie zmiany kierunku
+              }
+              obj.position.x += (obj.userData.tx - obj.position.x) * 0.05;
+              obj.position.z += (obj.userData.tz - obj.position.z) * 0.05;
+              obj.position.y = waterMesh.position.y - 1.5;
+              obj.lookAt(obj.userData.tx, obj.position.y, obj.userData.tz);
+              obj.rotation.x += Math.PI/2;
+          }
+      });
+
+      composer.render();
+    };
+    
+    animate();
+
+    const onResize = () => {
+      camera.aspect = mount.clientWidth / mount.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(mount.clientWidth, mount.clientHeight);
+      composer.setSize(mount.clientWidth, mount.clientHeight);
+    };
+    window.addEventListener('resize', onResize);
+
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener('resize', onResize);
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      if(mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
+      renderer.dispose();
+    };
+  }, []);
+
+  const buyAlgae = () => { if (water >= 15) { setWater(w => w - 15); setAlgae(a => a + 1); } };
+  const buyLarvae = () => { if (oxygen >= 20) { setOxygen(o => o - 20); setLarvae(l => l + 1); } };
+
+  const uiOverlay = { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, pointerEvents: 'none', zIndex: 10, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', padding: '20px', fontFamily: "'Courier New', monospace", color: '#fff' };
+  const barStyle = (val, color) => ({ width: `${val}%`, height: '10px', backgroundColor: color, transition: 'width 0.2s linear' });
+  const btnStyle = { pointerEvents: 'auto', background: 'rgba(20, 30, 20, 0.9)', border: '1px solid #4a6b4a', color: '#aaddaa', padding: '12px 20px', cursor: 'pointer', textTransform: 'uppercase', fontWeight: 'bold', borderRadius: '4px' };
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
+      <div ref={mountRef} style={{ width: '100%', height: '100%', position: 'absolute', zIndex: 1, touchAction: 'none' }} />
+
+      <div style={uiOverlay}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              
+              <div style={{ background: 'rgba(10,10,10,0.8)', padding: '15px', borderRadius: '8px', border: '1px solid #333', pointerEvents: 'auto' }}>
+                  <h1 style={{ margin: 0, color: '#aaddaa', letterSpacing: '4px', fontSize: '22px' }}>DENDROTELMA</h1>
+                  <p style={{ margin: '8px 0 0 0', fontSize: '13px', color: '#bbb' }}>Wiek: <strong style={{color: '#fff'}}>{day} Dni</strong> | Punkty: <strong style={{color:'#cca033'}}>{score}</strong></p>
+                  
+                  <div style={{ marginTop: '15px', fontSize: '11px', color: '#aaa', lineHeight: '1.6' }}>
+                      <strong>PRZETRWANIE:</strong><br/>
+                      🖱️ <strong>Kliknij liść:</strong> Oczyszczenie zgnilizny<br/>
+                      ↔️ <strong>Machaj po wodzie:</strong> Napowietrzanie
+                  </div>
+              </div>
+
+              <div style={{ width: '260px', background: 'rgba(10,10,10,0.8)', padding: '20px', borderRadius: '8px', border: '1px solid #333' }}>
+                  <div style={{ marginBottom: '15px' }}>
+                      <div style={{ fontSize: '11px', marginBottom: '5px', color: water<20?'#ff4444':'#ddd' }}>POZIOM WODY ({Math.round(water)}/100)</div>
+                      <div style={{ background: '#222', height: '10px', borderRadius: '2px', overflow: 'hidden' }}><div style={barStyle(water, '#4488bb')} /></div>
+                  </div>
+                  <div style={{ marginBottom: '15px' }}>
+                      <div style={{ fontSize: '11px', marginBottom: '5px', color: oxygen<20?'#ff4444':'#ddd' }}>NATLENIENIE ({Math.round(oxygen)}/100)</div>
+                      <div style={{ background: '#222', height: '10px', borderRadius: '2px', overflow: 'hidden' }}><div style={barStyle(oxygen, '#44aa66')} /></div>
+                  </div>
+                  <div>
+                      <div style={{ fontSize: '11px', marginBottom: '5px', color: toxicity>80?'#ff4444':'#ddd' }}>ZGNILIZNA ({Math.round(toxicity)}/100)</div>
+                      <div style={{ background: '#222', height: '10px', borderRadius: '2px', overflow: 'hidden' }}><div style={barStyle(toxicity, '#aa4433')} /></div>
+                  </div>
+              </div>
+          </div>
+
+          {gameOver ? (
+              <div style={{ pointerEvents: 'auto', background: 'rgba(30,10,10,0.95)', padding: '40px', textAlign: 'center', border: '1px solid #aa3333', margin: 'auto', borderRadius: '8px' }}>
+                  <h2 style={{ color: '#ff5555', fontSize: '32px', margin: '0 0 15px 0', letterSpacing: '2px' }}>EKOSYSTEM UMARŁ</h2>
+                  <p style={{ fontSize: '16px', color: '#ccc', marginBottom: '10px' }}>{cause}</p>
+                  <p style={{ color: '#aaa', marginBottom: '30px', fontSize: '14px' }}>Wynik: {score} Pkt. (Dni: {day})</p>
+                  <button style={{...btnStyle, padding: '12px 25px', fontSize: '14px'}} onClick={() => window.location.reload()}>Nowy Cykl</button>
+              </div>
+          ) : (
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '15px', paddingBottom: '10px' }}>
+                  <button style={water >= 15 ? btnStyle : {...btnStyle, opacity: 0.3, cursor: 'not-allowed'}} onClick={buyAlgae} disabled={water < 15}>
+                      🌿 Glony (15 💧)
+                  </button>
+                  <button style={oxygen >= 20 ? btnStyle : {...btnStyle, opacity: 0.3, cursor: 'not-allowed'}} onClick={buyLarvae} disabled={oxygen < 20}>
+                      🐛 Larwy (20 💨)
+                  </button>
+              </div>
+          )}
+      </div>
+    </div>
+  );
+}
